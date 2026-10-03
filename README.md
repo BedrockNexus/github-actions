@@ -63,11 +63,9 @@ permissions:
 
 jobs:
   deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     secrets: inherit
 ```
-
-Reference a release tag (`@v1`), not `@main`, so a change here can never break every deployment at once.
 
 The `permissions` block is required. A reusable workflow can only use the permissions its caller grants, and GitHub's default token permissions for new repositories and organizations are read-only, so `packages: write` must be granted here for the push to GHCR to work.
 
@@ -86,7 +84,7 @@ permissions:
 
 jobs:
   docker:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-pr.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-pr.yml@main
 ```
 
 This builds the production image exactly as a deployment would, and fails the check if the image does not build. It never logs in to GHCR, never pushes, never receives secrets and never contacts Coolify. Protect `main` with a branch rule that requires this check.
@@ -119,7 +117,7 @@ All inputs are optional. `docker-deploy.yml` and `docker-pr.yml` accept the same
 ```yaml
 jobs:
   deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     with:
       dockerfile: ./docker/production.Dockerfile
     secrets: inherit
@@ -130,7 +128,7 @@ jobs:
 ```yaml
 jobs:
   deploy-api:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     with:
       context: ./apps/api
       dockerfile: ./apps/api/Dockerfile
@@ -170,7 +168,7 @@ Use this when the secret names in the application repository differ, or when you
 ```yaml
 jobs:
   deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     secrets:
       COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
       COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
@@ -181,7 +179,7 @@ jobs:
 ```yaml
 jobs:
   deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     secrets: inherit
 ```
 
@@ -201,7 +199,7 @@ permissions:
 
 jobs:
   deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     with:
       environment: staging
     secrets:
@@ -229,7 +227,7 @@ permissions:
 
 jobs:
   image:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-build.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-build.yml@main
     with:
       push: true
 ```
@@ -265,7 +263,7 @@ jobs:
 
   deploy:
     needs: checks
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@v1
+    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     secrets: inherit
 ```
 
@@ -392,7 +390,7 @@ Coolify uses the server's Docker credentials when pulling. This token is only us
 Reproduce locally with `docker build -f Dockerfile .` from the same context. Common causes are a missing `.dockerignore` (huge contexts, leaked `node_modules`), files excluded by `.dockerignore` that the build needs, or build-time environment variables that the application expects but that are only defined in Coolify at runtime.
 
 ### `Unable to resolve action` / `workflow was not found`
-Check the `uses:` path and the tag. Callers must reference an existing tag of this repository (for example `@v1`), and this repository must stay public for the public application repositories to call it.
+Check the `uses:` path and the ref (`@main`). This repository must stay public for the public application repositories to call it.
 
 ### Coolify webhook authentication failures (HTTP 401/403)
 `COOLIFY_TOKEN` is missing, revoked or lacks **deploy** permission, or it belongs to a different Coolify team than the application. The image was pushed. After fixing the token, re-run the failed job to redeploy without rebuilding.
@@ -418,7 +416,7 @@ Layers are cached in the GitHub Actions cache (`type=gha`, `mode=max`), scoped p
 
 ## Maintenance
 
-- **Versioning.** Callers reference `@v1`. For a compatible change, move the `v1` tag to the new commit (`git tag -f v1 && git push -f origin v1`). For a breaking change, create `v2` and update the callers one at a time.
+- **Versioning.** Callers reference `@main`, so a change here applies to every app on its next run. Test changes on a branch first by pointing one app's workflow at `@<branch>`. If you ever need stricter stability, tag a release (for example `v1`) and point the callers at it.
 - **Linting.** [`lint.yml`](.github/workflows/lint.yml) runs actionlint on every push and pull request.
 - **Action updates.** Actions are pinned to commit SHAs with the version in a trailing comment. Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml)) opens a weekly grouped PR that updates both the SHA and the comment.
 - **Scope.** Keep this repository framework-agnostic. Anything specific to one application belongs in that application's `Dockerfile`.
