@@ -1,0 +1,139 @@
+name: Docker deploy
+
+# Builds and pushes the image to GHCR, then asks Coolify to redeploy.
+# Coolify is only called after the push job has succeeded.
+#
+# The caller must grant `contents: read` and `packages: write`.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Deployment environment name. Scopes concurrency so environments don't cancel each other.
+        type: string
+        default: production
+      image-name:
+        description: Full image name without tag. Defaults to ghcr.io/<owner>/<repo>.
+        type: string
+        default: ""
+      dockerfile:
+        description: Path to the Dockerfile, relative to the repository root.
+        type: string
+        default: ./Dockerfile
+      context:
+        description: Docker build context, relative to the repository root.
+        type: string
+        default: .
+      platforms:
+        description: Comma-separated target platforms.
+        type: string
+        default: linux/amd64
+      target:
+        description: Dockerfile stage to build. Defaults to the last stage.
+        type: string
+        default: ""
+      test-target:
+        description: Optional Dockerfile stage built before the image (e.g. a `test` stage). Deployment stops if it fails.
+        type: string
+        default: ""
+      build-args:
+        description: Newline-separated KEY=VALUE build arguments. Not for secrets.
+        type: string
+        default: ""
+      runner:
+        description: Runner label, or a JSON array of labels. Defaults to the BEDROCKNEXUS_RUNNER variable, then ubuntu-latest.
+        type: string
+        default: ""
+    secrets:
+      COOLIFY_WEBHOOK:
+        description: Coolify deploy webhook URL for the application.
+        required: true
+      COOLIFY_TOKEN:
+        description: Coolify API token with deploy permission.
+        required: true
+    outputs:
+      image:
+        description: Lowercase image name without tag.
+        value: ${{ jobs.build.outputs.image }}
+      tags:
+        description: Newline-separated list of pushed image tags.
+        value: ${{ jobs.build.outputs.tags }}
+      digest:
+        description: Digest of the pushed image.
+        value: ${{ jobs.build.outputs.digest }}
+
+# A newer deployment of the same repository and environment supersedes an
+# older one that is still running. Whatever is cancelled, the newest commit
+# is the one that ends up built, pushed and deployed.
+concurrency:
+  group: bedrocknexus-deploy-${{ github.repository }}-${{ inputs.environment }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Docker
+    uses: ./.github/workflows/docker-build.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: ${{ inputs.image-name }}
+      dockerfile: ${{ inputs.dockerfile }}
+      context: ${{ inputs.context }}
+      platforms: ${{ inputs.platforms }}
+      target: ${{ inputs.target }}
+      test-target: ${{ inputs.test-target }}
+      build-args: ${{ inputs.build-args }}
+      runner: ${{ inputs.runner }}
+      push: true
+
+  deploy:
+    name: Coolify
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Trigger Coolify deployment
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+        shell: bash
+        run: |
+          if [[ -z "$COOLIFY_WEBHOOK" || -z "$COOLIFY_TOKEN" ]]; then
+            echo "::error::COOLIFY_WEBHOOK and COOLIFY_TOKEN must both be set for this repository."
+            exit 1
+          fi
+
+          echo "Deploying ${IMAGE}@${DIGEST}"
+
+          # The Authorization header is read from stdin so the token never
+          # appears in the process list on the runner.
+          body="$RUNNER_TEMP/coolify-response.json"
+          status=$(curl --silent --show-error --max-time 60 \
+            --request POST \
+            --output "$body" --write-out '%{http_code}' \
+            --header @- "$COOLIFY_WEBHOOK" <<< "Authorization: Bearer ${COOLIFY_TOKEN}") || {
+            echo "::error::Could not reach Coolify. The image was pushed but not deployed."
+            exit 1
+          }
+
+          echo "Coolify responded with HTTP ${status}:"
+          cat "$body"; echo
+
+          if [[ "$status" != 2* ]]; then
+            echo "::error::Coolify rejected the deployment request (HTTP ${status}). The image was pushed but not deployed."
+            exit 1
+          fi
+
+          {
+            echo "### Coolify deployment triggered"
+            echo
+            echo "- Image: \`${IMAGE}@${DIGEST}\`"
+            echo "- HTTP status: ${status}"
+          } >> "$GITHUB_STEP_SUMMARY"

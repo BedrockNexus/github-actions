@@ -1,0 +1,17 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Local tooling
+.secrets
+.actrc

@@ -1,0 +1,61 @@
+name: Docker PR validation
+
+# Verifies that the production Docker image builds. Never pushes, never
+# deploys, and takes no secrets, so it is safe for fork pull requests.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: Image name used for tagging and cache scope. Defaults to ghcr.io/<owner>/<repo>.
+        type: string
+        default: ""
+      dockerfile:
+        description: Path to the Dockerfile, relative to the repository root.
+        type: string
+        default: ./Dockerfile
+      context:
+        description: Docker build context, relative to the repository root.
+        type: string
+        default: .
+      platforms:
+        description: Comma-separated target platforms.
+        type: string
+        default: linux/amd64
+      target:
+        description: Dockerfile stage to build. Defaults to the last stage.
+        type: string
+        default: ""
+      test-target:
+        description: Optional Dockerfile stage built before the image (e.g. a `test` stage).
+        type: string
+        default: ""
+      build-args:
+        description: Newline-separated KEY=VALUE build arguments. Not for secrets.
+        type: string
+        default: ""
+      runner:
+        description: Runner label, or a JSON array of labels. Defaults to the BEDROCKNEXUS_RUNNER variable, then ubuntu-latest.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Docker
+    uses: ./.github/workflows/docker-build.yml
+    permissions:
+      contents: read
+    with:
+      image-name: ${{ inputs.image-name }}
+      dockerfile: ${{ inputs.dockerfile }}
+      context: ${{ inputs.context }}
+      platforms: ${{ inputs.platforms }}
+      target: ${{ inputs.target }}
+      test-target: ${{ inputs.test-target }}
+      build-args: ${{ inputs.build-args }}
+      # Untrusted code from forks never runs on a self-hosted runner.
+      runner: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || inputs.runner }}
+      push: false
