@@ -1,8 +1,7 @@
 name: Docker build
 
 # Builds the calling repository's Dockerfile with Buildx and optionally pushes
-# the image to GHCR. docker-pr.yml and docker-deploy.yml are thin wrappers
-# around this workflow.
+# the image to GHCR. docker-pr.yml is a thin wrapper around this workflow.
 #
 # Permissions are inherited from the caller. Pushing requires the caller to
 # grant `packages: write`; building only requires `contents: read`.

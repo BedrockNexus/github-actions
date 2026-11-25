@@ -1,10 +1,10 @@
 # BedrockNexus GitHub Actions
 
-Central, reusable CI/CD workflows for the BedrockNexus apps: [hub](https://github.com/BedrockNexus/hub), [plugins](https://github.com/BedrockNexus/plugins) and [api](https://github.com/BedrockNexus/api).
+Central, reusable CI workflows for the BedrockNexus apps: [hub](https://github.com/BedrockNexus/hub) and [api](https://github.com/BedrockNexus/api).
 
-Every BedrockNexus app ships as a Docker image. This repository owns *how* that image is built, published and deployed, so application repositories contain almost no CI/CD logic: just a `Dockerfile` and a few lines of workflow YAML.
+Every BedrockNexus app ships as a Docker image. This repository owns *how* that image is built, validated and published, so application repositories contain almost no CI logic: just a `Dockerfile` and a few lines of workflow YAML.
 
-This repository is **public** on purpose. The application repositories are public, and GitHub only lets public repositories call reusable workflows that live in public repositories. The workflows contain no secrets: Coolify credentials stay in GitHub Actions secrets and are passed in at run time.
+This repository is **public** on purpose. The application repositories are public, and GitHub only lets public repositories call reusable workflows that live in public repositories. The workflows take no secrets.
 
 ## Architecture
 
@@ -16,40 +16,33 @@ Reusable GitHub Actions (this repository)
 Docker Buildx / BuildKit (GitHub Actions cache)
         ↓
 GitHub Container Registry: ghcr.io/bedrocknexus/<repo>
-        ↓
-Coolify deploy webhook
-        ↓
-Hetzner production server (Coolify pulls the image)
 ```
 
-Coolify **never builds source code**. It is configured as a *Docker Image* deployment and only pulls the image that GitHub Actions has already built and pushed.
-
-The deployment sequence is strictly:
+The pipeline stops at the registry. Deploying is not part of CI: whoever runs an app pulls the published image (or builds the `Dockerfile` themselves) and runs it. The sequence is:
 
 ```
-checkout → validation (optional) → docker build → docker push → Coolify webhook
+checkout → validation (optional) → docker build → docker push
 ```
 
-Coolify is triggered in a separate job that depends on the build job. If checkout, validation, the build, GHCR login or the push fails, the webhook is never called.
+If checkout, validation, the build or the GHCR login fails, nothing is pushed.
 
 ## Workflows
 
-| Workflow | Purpose | Pushes | Deploys | Secrets |
-| --- | --- | --- | --- | --- |
-| [`docker-deploy.yml`](.github/workflows/docker-deploy.yml) | Production deployment | ✅ | ✅ | `COOLIFY_WEBHOOK`, `COOLIFY_TOKEN` |
-| [`docker-pr.yml`](.github/workflows/docker-pr.yml) | Pull-request validation | ❌ | ❌ | none |
-| [`docker-build.yml`](.github/workflows/docker-build.yml) | Shared build engine used by both of the above | optional | ❌ | none (uses `GITHUB_TOKEN`) |
+| Workflow | Purpose | Pushes | Secrets |
+| --- | --- | --- | --- |
+| [`docker-build.yml`](.github/workflows/docker-build.yml) | Build the image, optionally pushing it to GHCR | optional | none (uses `GITHUB_TOKEN`) |
+| [`docker-pr.yml`](.github/workflows/docker-pr.yml) | Pull-request validation | ❌ | none |
 
-`docker-pr.yml` and `docker-deploy.yml` both call `docker-build.yml`, so all build logic lives in one place.
+`docker-pr.yml` calls `docker-build.yml`, so all build logic lives in one place.
 
 ## Quick start
 
-### Production deployment
+### Publishing the image
 
-`.github/workflows/deploy.yml` in the application repository:
+`.github/workflows/image.yml` in the application repository:
 
 ```yaml
-name: Deploy
+name: Image
 
 on:
   push:
@@ -61,13 +54,20 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
-    secrets: inherit
+  image:
+    uses: BedrockNexus/github-actions/.github/workflows/docker-build.yml@main
+    with:
+      push: true
 ```
 
 The `permissions` block is required. A reusable workflow can only use the permissions its caller grants, and GitHub's default token permissions for new repositories and organizations are read-only, so `packages: write` must be granted here for the push to GHCR to work.
+
+The `concurrency` block cancels an older run when a newer commit lands, so the newest commit is always the one published.
 
 ### Pull-request validation
 
@@ -87,65 +87,59 @@ jobs:
     uses: BedrockNexus/github-actions/.github/workflows/docker-pr.yml@main
 ```
 
-This builds the production image exactly as a deployment would, and fails the check if the image does not build. It never logs in to GHCR, never pushes, never receives secrets and never contacts Coolify. Protect `main` with a branch rule that requires this check.
+This builds the production image exactly as `main` would, and fails the check if the image does not build. It never logs in to GHCR, never pushes and never receives secrets. Protect `main` with a branch rule that requires this check.
 
 ## Inputs
 
-All inputs are optional. `docker-deploy.yml` and `docker-pr.yml` accept the same build inputs and forward them to `docker-build.yml`.
+All inputs are optional. `docker-pr.yml` accepts the same build inputs, except `push`, and forwards them to `docker-build.yml`.
 
-| Input | Default | Available in | Description |
-| --- | --- | --- | --- |
-| `image-name` | `ghcr.io/<owner>/<repo>` | all | Full image name without a tag. Lowercased automatically. |
-| `dockerfile` | `./Dockerfile` | all | Dockerfile path relative to the repository root. |
-| `context` | `.` | all | Build context relative to the repository root. |
-| `platforms` | `linux/amd64` | all | Comma-separated platforms, e.g. `linux/amd64,linux/arm64`. QEMU is set up automatically for non-default platforms. |
-| `target` | last stage | all | Dockerfile stage to build as the image. |
-| `test-target` | none | all | Dockerfile stage built **before** the image as a validation step (see [Validation](#validation)). |
-| `build-args` | none | all | Newline-separated `KEY=VALUE` build arguments. |
-| `runner` | `BEDROCKNEXUS_RUNNER` variable, else `ubuntu-latest` | all | Runner label or JSON array of labels for the build job. |
-| `environment` | `production` | deploy | Deployment environment name; scopes concurrency. |
-| `push` | `false` | build | Push to GHCR. Only relevant when calling `docker-build.yml` directly. |
+| Input | Default | Description |
+| --- | --- | --- |
+| `image-name` | `ghcr.io/<owner>/<repo>` | Full image name without a tag. Lowercased automatically. |
+| `dockerfile` | `./Dockerfile` | Dockerfile path relative to the repository root. |
+| `context` | `.` | Build context relative to the repository root. |
+| `platforms` | `linux/amd64` | Comma-separated platforms, e.g. `linux/amd64,linux/arm64`. QEMU is set up automatically for non-default platforms. |
+| `target` | last stage | Dockerfile stage to build as the image. |
+| `test-target` | none | Dockerfile stage built **before** the image as a validation step (see [Validation](#validation)). |
+| `build-args` | none | Newline-separated `KEY=VALUE` build arguments. |
+| `runner` | `BEDROCKNEXUS_RUNNER` variable, else `ubuntu-latest` | Runner label or JSON array of labels for the build job. |
+| `push` | `false` | Push to GHCR. Refused on `pull_request` events. |
 
 ### Outputs
 
-`docker-build.yml` exposes `image`, `tags`, `version` and `digest`. `docker-deploy.yml` exposes `image`, `tags` and `digest`. `digest` is empty when the image was not pushed.
+`docker-build.yml` exposes `image`, `tags`, `version` and `digest`. `digest` is empty when the image was not pushed.
 
 ## Examples
 
-### Custom Dockerfile location
+### Several images from one repository
 
 ```yaml
 jobs:
-  deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
+  api:
+    uses: BedrockNexus/github-actions/.github/workflows/docker-build.yml@main
     with:
-      dockerfile: ./docker/production.Dockerfile
-    secrets: inherit
+      push: true
+      target: runner
+      test-target: test
+
+  validator:
+    needs: api
+    uses: BedrockNexus/github-actions/.github/workflows/docker-build.yml@main
+    with:
+      push: true
+      target: validator
+      image-name: ghcr.io/bedrocknexus/api-validator
 ```
 
-### Custom build context (monorepo)
+Give each image its own `image-name`, so they get separate GHCR packages and build caches.
+
+### Custom Dockerfile location or context
 
 ```yaml
-jobs:
-  deploy-api:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
     with:
+      push: true
       context: ./apps/api
       dockerfile: ./apps/api/Dockerfile
-      image-name: ghcr.io/bedrocknexus/hub-worker
-      environment: production-api
-    secrets:
-      COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK_API }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-```
-
-When one repository deploys several images, give each its own `image-name` (separate GHCR packages and build caches) and its own `environment` (separate concurrency groups, so they do not cancel each other).
-
-### Custom image name
-
-```yaml
-    with:
-      image-name: ghcr.io/bedrocknexus/hub-preview
 ```
 
 The image must live under `ghcr.io/bedrocknexus/...`: the workflow authenticates to GHCR with the repository's `GITHUB_TOKEN`.
@@ -159,84 +153,24 @@ The image must live under `ghcr.io/bedrocknexus/...`: the workflow authenticates
         NODE_VERSION=22
 ```
 
-Build arguments are stored in the image metadata and visible to anyone who can pull the image. **Never pass secrets as build arguments.** Runtime secrets belong in Coolify's environment variables.
+Build arguments are stored in the image metadata and visible to anyone who can pull the image. **Never pass secrets as build arguments.** Runtime secrets belong in the environment of whatever runs the container.
 
-### Explicit Coolify secrets
+### Release images
 
-Use this when the secret names in the application repository differ, or when you prefer to be explicit:
-
-```yaml
-jobs:
-  deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
-    secrets:
-      COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-```
-
-### Inherited secrets
+Git tags produce version tags (`v1.0.0`) but do not move `latest`:
 
 ```yaml
-jobs:
-  deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
-    secrets: inherit
-```
-
-`secrets: inherit` passes all of the caller's repository and organization secrets to the reusable workflow. It works because the caller and this repository belong to the same organization. It is the simplest option when `COOLIFY_WEBHOOK` and `COOLIFY_TOKEN` exist with exactly those names. A common setup is `COOLIFY_TOKEN` as an organization secret and `COOLIFY_WEBHOOK` as a repository secret, since the webhook is different for each application.
-
-### Staging environment
-
-```yaml
-on:
-  push:
-    branches:
-      - develop
-
-permissions:
-  contents: read
-  packages: write
-
-jobs:
-  deploy:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
-    with:
-      environment: staging
-    secrets:
-      COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK_STAGING }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-```
-
-Point the staging Coolify application at the `develop` tag.
-
-### Publishing release images
-
-Git tags produce version tags (`v1.0.0`) but do not move `latest`. To publish release images without deploying:
-
-```yaml
-name: Release
-
 on:
   push:
     tags:
       - "v*"
-
-permissions:
-  contents: read
-  packages: write
-
-jobs:
-  image:
-    uses: BedrockNexus/github-actions/.github/workflows/docker-build.yml@main
-    with:
-      push: true
 ```
 
 ## Validation
 
 The Dockerfile is the only interface between an application and this pipeline, and it is also where validation lives. Choose either approach:
 
-1. **Validation inside the build.** Run lint, type checks or tests in a `RUN` step of the build stage. If they fail, the build fails and nothing is pushed or deployed.
+1. **Validation inside the build.** Run lint, type checks or tests in a `RUN` step of the build stage. If they fail, the build fails and nothing is pushed.
 2. **A dedicated test stage.** Add a stage to the Dockerfile and pass `test-target`:
 
    ```dockerfile
@@ -249,55 +183,26 @@ The Dockerfile is the only interface between an application and this pipeline, a
          test-target: test
    ```
 
-   The test stage is built first. Only if it succeeds is the production image built, pushed and deployed. Both stages share the build cache.
+   The test stage is built first. Only if it succeeds is the image built and pushed. Both stages share the build cache.
 
-If a project needs checks that cannot run in Docker, add its own job in the caller and gate the deployment with `needs:`:
-
-```yaml
-jobs:
-  checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: ./scripts/check.sh
-
-  deploy:
-    needs: checks
-    uses: BedrockNexus/github-actions/.github/workflows/docker-deploy.yml@main
-    secrets: inherit
-```
+If a project needs checks that cannot run in Docker, add its own job in the caller and gate the image with `needs:`.
 
 ## Required project files
 
 Each application repository provides:
 
-- **`Dockerfile`** - defines how the application is built and run. This repository does not know or care whether the project uses Next.js, Bun, Hono, Payload CMS, React, a static site or a worker.
+- **`Dockerfile`** - defines how the application is built and run. This repository does not know or care whether the project uses Next.js, Bun, Hono, a static site or a worker.
 - **`.dockerignore`** - keeps `node_modules`, `.git`, `.env*`, build output and other local artifacts out of the build context. This makes builds faster, keeps cache hits stable and prevents local secrets from leaking into images.
 
 If `docker build .` works locally, the pipeline can build it.
 
-## Required secrets
-
-| Secret | Used by | Description |
-| --- | --- | --- |
-| `COOLIFY_WEBHOOK` | `docker-deploy.yml` | The application's deploy webhook URL. In Coolify: **Application → Webhooks → Deploy Webhook**. It has the form `https://<coolify-host>/api/v1/deploy?uuid=<application-uuid>&force=false`. |
-| `COOLIFY_TOKEN` | `docker-deploy.yml` | A Coolify API token with **deploy** permission. In Coolify: **Keys & Tokens → API tokens**. Sent as `Authorization: Bearer <token>`. |
-
-Store both as GitHub Actions secrets (organization or repository level). Never commit them, and never hardcode Coolify URLs, UUIDs or tokens in workflows.
-
-GHCR authentication needs **no secret**: the workflow uses the built-in `GITHUB_TOKEN`, scoped to `packages: write` for the push job only. No personal access token is involved in CI.
-
 ## GHCR
 
-Images are published to:
-
-```
-ghcr.io/<organization>/<repository>
-```
-
-For example, `BedrockNexus/hub` becomes `ghcr.io/bedrocknexus/hub`. Image names are lowercased automatically because registries require it.
+Images are published to `ghcr.io/<organization>/<repository>`. For example, `BedrockNexus/hub` becomes `ghcr.io/bedrocknexus/hub`. Image names are lowercased automatically because registries require it.
 
 The first push creates the package in the organization and links it to the source repository through the `org.opencontainers.image.source` label. The package inherits access from that repository.
+
+GHCR authentication needs **no secret**: the workflow uses the built-in `GITHUB_TOKEN`. No personal access token is involved in CI.
 
 ## Image tagging
 
@@ -310,35 +215,17 @@ Tags are generated by [`docker/metadata-action`](https://github.com/docker/metad
 | Git tag `v1.0.0` | `v1.0.0`, `sha-<short-sha>` |
 | Pull request (built, never pushed) | `pr-<number>`, `sha-<short-sha>` |
 
-- **`latest`** / **`main`** are moving tags. Coolify tracks one of them.
-- **`sha-xxxxxxx`** is immutable. It identifies exactly which commit is inside an image, which makes it the tag to use for audits, debugging and **rollbacks**: set Coolify's image tag to a previous `sha-…` tag and redeploy. No rebuild is needed.
+- **`latest`** / **`main`** are moving tags.
+- **`sha-xxxxxxx`** is immutable. It identifies exactly which commit is inside an image, which makes it the tag to use for audits, debugging and **rollbacks**: run an earlier `sha-…` tag. No rebuild is needed.
 - **`v1.0.0`** mirrors Git tags and never moves `latest`.
 
 Images also carry OCI labels and annotations such as `org.opencontainers.image.source`, `org.opencontainers.image.revision`, `org.opencontainers.image.created` and `org.opencontainers.image.version`.
 
-## Coolify setup
-
-For each application:
-
-1. Create the resource as a **Docker Image** deployment, not a Git-based or Dockerfile build. Coolify must never build source code.
-2. Set the image to `ghcr.io/bedrocknexus/<repository>` and the tag to `latest` (production) or to the branch tag for other environments (e.g. `develop`).
-3. If the GHCR package is private, log the Coolify server in to GHCR once (see [Private GHCR access](#private-ghcr-access)).
-4. Copy the **Deploy Webhook** URL into the repository's `COOLIFY_WEBHOOK` secret.
-5. Create an API token with deploy permission and store it as `COOLIFY_TOKEN`.
-6. Disable Coolify's own Git auto-deploy for the resource, so GitHub Actions is the only thing that triggers deployments.
-
-When the webhook fires, Coolify pulls the configured tag, which the workflow has just pushed, and restarts the application.
-
-## Concurrency
-
-Deployments are grouped by repository and `environment`. When a newer commit is pushed while an older deployment is still running, the older run is cancelled. The newest commit is always the one that gets built, pushed and deployed, and two deployments of the same environment never race. Different environments (`production`, `staging`) do not affect each other.
-
 ## Security
 
-- **Minimal permissions.** Each job requests only what it needs: the build job gets `contents: read` plus `packages: write` when pushing, and the Coolify job gets no token permissions.
-- **Secrets only where needed.** Only the final Coolify job receives `COOLIFY_WEBHOOK` and `COOLIFY_TOKEN`. The build job, which runs application code during `docker build`, never sees them.
-- **No secrets in logs.** Secrets are passed through environment variables, never interpolated into scripts, and the bearer token is sent to `curl` over stdin so it does not appear in the runner's process list.
-- **Pull requests cannot deploy.** `docker-pr.yml` takes no secrets and never pushes. `docker-build.yml` refuses to push from `pull_request` events and refuses to run under `pull_request_target` at all.
+- **Minimal permissions.** The build job gets `contents: read`, plus `packages: write` only when the caller grants it for pushing.
+- **No secrets.** The workflows take none, so application code run during `docker build` has nothing to read.
+- **Pull requests cannot push.** `docker-pr.yml` never pushes. `docker-build.yml` refuses to push from `pull_request` events and refuses to run under `pull_request_target` at all.
 - **Forks are isolated.** Fork pull requests always build on GitHub-hosted runners, even if a self-hosted runner is configured.
 - **Checkout credentials are not persisted.** The repository token is not left on disk for the Docker build to read.
 - **Pinned actions.** Third-party actions are pinned to full commit SHAs, and Dependabot keeps them updated (see [Maintenance](#maintenance)).
@@ -364,45 +251,28 @@ Notes for the runner:
 - It needs Docker installed and GitHub Actions runner v2.327.1 or newer (the pinned actions run on Node 24). Buildx is set up by the workflow.
 - The GitHub Actions cache works from self-hosted runners, so cache behavior is unchanged.
 - Fork pull requests are forced onto `ubuntu-latest` so untrusted code never runs on BedrockNexus infrastructure.
-- The Coolify trigger job always runs on `ubuntu-latest`. It only makes one HTTPS request.
+- Do not use a production server as the runner: image builds need far more memory than the apps do.
 
 ## Troubleshooting
 
 ### `denied: permission_denied` / `installation not allowed to Write organization package`
-The push job lacks `packages: write`. Add the `permissions` block from the [quick start](#production-deployment) to the caller. If the package already exists, open it in GitHub (**Package settings → Manage Actions access**) and give the repository **Write** access. Packages created by a different repository are not writable by default.
+The build job lacks `packages: write`. Add the `permissions` block from the [quick start](#publishing-the-image) to the caller. If the package already exists, open it in GitHub (**Package settings → Manage Actions access**) and give the repository **Write** access. Packages created by a different repository are not writable by default.
 
 ### `The nested job 'build' is requesting 'packages: write', but is only allowed 'packages: read'`
 Same cause: the calling workflow must grant `packages: write`.
 
-### GHCR image inaccessible / `unauthorized` when Coolify pulls
-The package is private and the Coolify server is not logged in. See [Private GHCR access](#private-ghcr-access). Also check that the image name and tag configured in Coolify exist in GHCR.
-
-### Private GHCR access
-Private packages need registry credentials on the Coolify server. Create a GitHub token with only the `read:packages` scope (ideally from a dedicated machine user) and log in on the server:
+### `unauthorized` when pulling the image
+The package is private. Make it public in **Package settings**, or log the pulling machine in to GHCR with a token that has only the `read:packages` scope:
 
 ```bash
 echo "<token>" | docker login ghcr.io -u <github-username> --password-stdin
 ```
 
-Coolify uses the server's Docker credentials when pulling. This token is only used on the server and never in CI.
-
 ### Dockerfile build failures
-Reproduce locally with `docker build -f Dockerfile .` from the same context. Common causes are a missing `.dockerignore` (huge contexts, leaked `node_modules`), files excluded by `.dockerignore` that the build needs, or build-time environment variables that the application expects but that are only defined in Coolify at runtime.
+Reproduce locally with `docker build -f Dockerfile .` from the same context. Common causes are a missing `.dockerignore` (huge contexts, leaked `node_modules`), files excluded by `.dockerignore` that the build needs, or build-time environment variables that the application expects but that are only defined at runtime.
 
 ### `Unable to resolve action` / `workflow was not found`
 Check the `uses:` path and the ref (`@main`). This repository must stay public for the public application repositories to call it.
-
-### Coolify webhook authentication failures (HTTP 401/403)
-`COOLIFY_TOKEN` is missing, revoked or lacks **deploy** permission, or it belongs to a different Coolify team than the application. The image was pushed. After fixing the token, re-run the failed job to redeploy without rebuilding.
-
-### Coolify returns 404
-The application UUID in `COOLIFY_WEBHOOK` is wrong or the application was recreated. Copy the webhook again from Coolify.
-
-### `COOLIFY_WEBHOOK and COOLIFY_TOKEN must both be set`
-The secrets are not visible to the caller. Check their names and, for organization secrets, that the repository is in the secret's access list. When mapping explicitly, check the right-hand side names.
-
-### Coolify deployed an old version / incorrect image tags
-Coolify is tracking a tag the workflow did not move. `latest` only moves on default-branch builds, and Git tags only create `vX.Y.Z` tags. Check the job summary for the exact tags pushed, and make sure Coolify's tag matches the branch that deploys.
 
 ### Docker build cache behavior
 Layers are cached in the GitHub Actions cache (`type=gha`, `mode=max`), scoped per image and target. Things to know:
@@ -411,7 +281,7 @@ Layers are cached in the GitHub Actions cache (`type=gha`, `mode=max`), scoped p
 - The first build on a new repository or image name is cold.
 - A single `COPY . .` early in the Dockerfile invalidates every later layer on each commit. Copy lockfiles and install dependencies *before* copying the source.
 - The repository cache limit is 10 GB by default. Old entries are evicted automatically.
-- A cache export failure is ignored, so it never fails an otherwise successful deployment.
+- A cache export failure is ignored, so it never fails an otherwise successful build.
 - To force a clean build, delete the cache entries under **Actions → Caches** in the application repository.
 
 ## Maintenance
